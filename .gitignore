@@ -1,0 +1,10 @@
+.streamlit/secrets.toml
+data/
+work/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+.venv/
+venv/
