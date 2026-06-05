@@ -1,11 +1,13 @@
 import hashlib
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import requests
 import streamlit as st
 
 try:
@@ -18,10 +20,13 @@ APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 LOG_DIR = DATA_DIR / "logs"
+CONFIG_PATH = DATA_DIR / "admin_config.json"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_MODEL = "gpt-5-mini"
+DEFAULT_MFDS_ENDPOINT = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrugPrdtPrmsnInq07"
+DEFAULT_MFDS_TERMS = "cefazolin, cephalexin, cefuroxime, cefoxitin, ceftriaxone, cefotaxime, ceftazidime, cefepime"
 
 
 st.set_page_config(
@@ -544,6 +549,19 @@ def get_admin_password_hash() -> str:
     return get_secret("ADMIN_PASSWORD_HASH", sha256_text("admin1234"))
 
 
+def load_admin_config() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_admin_config(config: dict[str, Any]) -> None:
+    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 @st.cache_data(show_spinner=False)
 def base_antibiotics_df() -> pd.DataFrame:
     return pd.DataFrame(BASE_ANTIBIOTICS)
@@ -587,6 +605,154 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col not in renamed.columns:
             renamed[col] = ""
     return renamed[required].fillna("")
+
+
+def find_value(record: dict[str, Any], *keys: str) -> str:
+    lowered = {str(k).lower(): v for k, v in record.items()}
+    for key in keys:
+        value = lowered.get(key.lower())
+        if value not in [None, ""]:
+            return str(value)
+    return ""
+
+
+def strip_html(value: str) -> str:
+    value = re.sub(r"<[^>]+>", " ", str(value))
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def infer_generation_from_name(name: str) -> str:
+    text = name.lower()
+    mapping = {
+        "cefazolin": "1세대",
+        "cephalexin": "1세대",
+        "cefuroxime": "2세대",
+        "cefoxitin": "2세대",
+        "ceftriaxone": "3세대",
+        "cefotaxime": "3세대",
+        "ceftazidime": "3세대",
+        "cefepime": "4세대",
+        "세파졸린": "1세대",
+        "세팔렉신": "1세대",
+        "세푸록심": "2세대",
+        "세폭시틴": "2세대",
+        "세프트리악손": "3세대",
+        "세포탁심": "3세대",
+        "세프타지딤": "3세대",
+        "세페핌": "4세대",
+    }
+    for needle, generation in mapping.items():
+        if needle in text:
+            return generation
+    return ""
+
+
+def normalize_mfds_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+
+    body = payload.get("body") or payload.get("Body") or payload
+    items = body.get("items") if isinstance(body, dict) else None
+    if isinstance(items, dict):
+        item = items.get("item") or items.get("ITEM")
+        if isinstance(item, list):
+            return item
+        if isinstance(item, dict):
+            return [item]
+    if isinstance(items, list):
+        return items
+    item = body.get("item") if isinstance(body, dict) else None
+    if isinstance(item, list):
+        return item
+    if isinstance(item, dict):
+        return [item]
+    return []
+
+
+def mfds_record_to_antibiotic(record: dict[str, Any], search_term: str) -> dict[str, str]:
+    item_name = find_value(record, "ITEM_NAME", "itemName", "item_name", "품목명")
+    entp_name = find_value(record, "ENTP_NAME", "entpName", "entp_name", "업체명")
+    item_seq = find_value(record, "ITEM_SEQ", "itemSeq", "item_seq", "품목기준코드")
+    class_name = find_value(record, "CLASS_NAME", "className", "CLASS_NO", "etcOtcName", "ETC_OTC_NAME")
+    material = strip_html(find_value(record, "MATERIAL_NAME", "materialName", "주성분", "성분명"))
+    efficacy = strip_html(find_value(record, "EE_DOC_DATA", "efcyQesitm", "efficacy", "효능효과"))
+    use_method = strip_html(find_value(record, "UD_DOC_DATA", "useMethodQesitm", "용법용량"))
+    caution = strip_html(find_value(record, "NB_DOC_DATA", "atpnQesitm", "주의사항"))
+    storage = strip_html(find_value(record, "STORAGE_METHOD", "storageMethod", "저장방법"))
+
+    display_name = item_name or search_term
+    ingredient = search_term.lower().strip()
+    return {
+        "generation": infer_generation_from_name(f"{ingredient} {display_name} {material}"),
+        "ingredient": ingredient,
+        "korean_name": display_name,
+        "route": "",
+        "spectrum": material[:250],
+        "typical_use": efficacy[:350],
+        "avoid_or_caution": caution[:350],
+        "billing_review_points": f"식약처 허가정보 동기화 항목. 품목기준코드: {item_seq or '확인 필요'}, 업체명: {entp_name or '확인 필요'}, 분류: {class_name or '확인 필요'}",
+        "renal_adjustment": "허가사항, DUR, 환자 신기능 기준 별도 확인",
+        "notes": f"식약처 API 동기화. 저장방법/용법: {(storage + ' ' + use_method).strip()[:250]}",
+    }
+
+
+def fetch_mfds_drugs(
+    service_key: str,
+    endpoint: str,
+    search_terms: list[str],
+    key_param: str,
+    query_param: str,
+    rows_per_term: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    rows: list[dict[str, str]] = []
+    errors: list[str] = []
+    if not service_key:
+        return pd.DataFrame(), ["식약처 API 인증키를 입력하세요."]
+    if not endpoint:
+        return pd.DataFrame(), ["식약처 API 엔드포인트를 입력하세요."]
+
+    for term in search_terms:
+        term = term.strip()
+        if not term:
+            continue
+        params = {
+            key_param: service_key,
+            "pageNo": 1,
+            "numOfRows": rows_per_term,
+            "type": "json",
+            query_param: term,
+        }
+        try:
+            response = requests.get(endpoint, params=params, timeout=20)
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except ValueError:
+                errors.append(f"{term}: JSON 응답이 아닙니다. API의 type/json 지원 여부를 확인하세요.")
+                continue
+            items = normalize_mfds_items(payload)
+            if not items:
+                errors.append(f"{term}: 조회 결과 없음")
+                continue
+            for item in items:
+                if isinstance(item, dict):
+                    rows.append(mfds_record_to_antibiotic(item, term))
+        except Exception as exc:
+            errors.append(f"{term}: {exc}")
+
+    if not rows:
+        return pd.DataFrame(), errors
+    df = pd.DataFrame(rows)
+    return normalize_columns(df), errors
+
+
+def save_custom_antibiotics(df: pd.DataFrame, source: str) -> Path:
+    path = UPLOAD_DIR / f"antibiotics_{source}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    st.cache_data.clear()
+    return path
 
 
 def load_custom_antibiotics() -> pd.DataFrame:
@@ -748,14 +914,88 @@ def admin_page(drug_df: pd.DataFrame) -> None:
             normalized = normalize_columns(raw_df)
             st.dataframe(normalized, use_container_width=True, hide_index=True)
             if st.button("업로드 자료 반영", type="primary"):
-                path = UPLOAD_DIR / f"antibiotics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                normalized.to_csv(path, index=False, encoding="utf-8-sig")
+                save_custom_antibiotics(normalized, "upload")
                 audit_log("upload_antibiotics", {"filename": uploaded.name, "rows": len(normalized)})
-                st.cache_data.clear()
                 st.success(f"{len(normalized):,}개 항목을 반영했습니다.")
                 st.rerun()
         except Exception as exc:
             st.error(f"업로드 처리 실패: {exc}")
+
+    st.divider()
+    st.subheader("식약처 API 설정 및 약제 동기화")
+    st.caption("공공데이터포털에서 발급받은 식품의약품안전처 의약품 API 인증키를 등록하면 약제 허가정보를 조회해 항생제 리스트에 반영할 수 있습니다.")
+    config = load_admin_config()
+    mfds_config = config.get("mfds", {})
+    mfds_key = st.text_input(
+        "식약처 API 인증키",
+        value=mfds_config.get("service_key", get_secret("MFDS_API_KEY", "")),
+        type="password",
+        help="공공데이터포털(data.go.kr)에서 발급받은 일반 인증키를 입력하세요.",
+    )
+    mfds_endpoint = st.text_input(
+        "식약처 API 엔드포인트",
+        value=mfds_config.get("endpoint", DEFAULT_MFDS_ENDPOINT),
+        help="기본값은 의약품 제품 허가정보 조회 API입니다.",
+    )
+    mfds_key_param = st.text_input(
+        "인증키 파라미터명",
+        value=mfds_config.get("key_param", "serviceKey"),
+        help="공공데이터포털 API에 따라 serviceKey 또는 ServiceKey를 사용합니다.",
+    )
+    mfds_query_param = st.text_input(
+        "검색 파라미터명",
+        value=mfds_config.get("query_param", "item_name"),
+        help="API 종류에 따라 item_name, itemName 등이 다를 수 있습니다.",
+    )
+    mfds_terms = st.text_area(
+        "동기화 검색어",
+        value=mfds_config.get("search_terms", DEFAULT_MFDS_TERMS),
+        help="쉼표로 구분합니다. 예: cefazolin, ceftriaxone, cefepime",
+    )
+    rows_per_term = st.number_input(
+        "검색어별 최대 조회 건수",
+        min_value=1,
+        max_value=100,
+        value=int(mfds_config.get("rows_per_term", 10)),
+        step=1,
+    )
+    mfds_col1, mfds_col2 = st.columns([1, 1])
+    with mfds_col1:
+        if st.button("식약처 API 설정 저장", use_container_width=True):
+            config["mfds"] = {
+                "service_key": mfds_key,
+                "endpoint": mfds_endpoint,
+                "key_param": mfds_key_param,
+                "query_param": mfds_query_param,
+                "search_terms": mfds_terms,
+                "rows_per_term": int(rows_per_term),
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            save_admin_config(config)
+            audit_log("mfds_config_update", {"endpoint": mfds_endpoint, "query_param": mfds_query_param, "has_key": bool(mfds_key)})
+            st.success("식약처 API 설정을 저장했습니다.")
+    with mfds_col2:
+        if st.button("식약처 API 동기화", type="primary", use_container_width=True):
+            terms = [x.strip() for x in mfds_terms.split(",") if x.strip()]
+            with st.spinner("식약처 API에서 약제 허가정보를 조회하는 중입니다."):
+                synced_df, errors = fetch_mfds_drugs(mfds_key, mfds_endpoint, terms, mfds_key_param, mfds_query_param, int(rows_per_term))
+            if not synced_df.empty:
+                current_custom = load_custom_antibiotics()
+                merged = pd.concat([current_custom, synced_df], ignore_index=True) if not current_custom.empty else synced_df
+                merged = normalize_columns(merged)
+                merged["ingredient_key"] = merged["ingredient"].str.lower().str.strip()
+                merged = merged.drop_duplicates("ingredient_key", keep="last").drop(columns=["ingredient_key"])
+                save_custom_antibiotics(merged, "mfds")
+                audit_log("mfds_sync", {"rows": len(synced_df), "terms": terms, "errors": errors[:10]})
+                st.success(f"식약처 API에서 {len(synced_df):,}개 항목을 동기화했습니다.")
+                st.dataframe(synced_df, use_container_width=True, hide_index=True)
+                if errors:
+                    st.warning("일부 검색어는 결과가 없거나 오류가 있었습니다.")
+                    st.write(errors[:10])
+            else:
+                st.error("동기화된 항목이 없습니다.")
+                if errors:
+                    st.write(errors[:10])
 
     st.divider()
     st.subheader("AI API 설정")
