@@ -125,11 +125,11 @@ def inject_site_style() -> None:
         }
 
         .hero-main h1 {
-            font-size: clamp(2.1rem, 4vw, 4.15rem);
-            line-height: 1.02;
+            font-size: clamp(1.85rem, 2.8vw, 2.85rem);
+            line-height: 1.12;
             letter-spacing: 0;
             margin: 0.75rem 0 0.8rem;
-            max-width: 14ch;
+            max-width: 18ch;
         }
 
         .hero-copy {
@@ -249,7 +249,7 @@ def inject_site_style() -> None:
             }
 
             .hero-main h1 {
-                font-size: 2.25rem;
+                font-size: 1.95rem;
             }
         }
         </style>
@@ -265,7 +265,7 @@ def render_website_header(drug_count: int, is_admin: bool) -> None:
         <section class="site-hero">
             <div class="hero-main">
                 <span class="eyebrow">AI Antibiotic Review Workspace</span>
-                <h1>항생제 처방을 실무 기준으로 검토합니다</h1>
+                <h1>항생제 처방 가이드</h1>
                 <p class="hero-copy">
                     원무·청구심사 부서가 자주 놓치는 세팔로스포린 세대, 병용 조합, 예방적 사용기간,
                     배양 후 축소 여부를 한 화면에서 확인하도록 구성한 병원 운영용 웹앱입니다.
