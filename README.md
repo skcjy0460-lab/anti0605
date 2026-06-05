@@ -46,9 +46,10 @@ OPENAI_API_KEY = "sk-..."
 엔드포인트: https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrugPrdtPrmsnInq07
 인증키 파라미터명: serviceKey
 검색 파라미터명: item_name
+JSON 응답 파라미터명: type
 ```
 
-API 종류나 승인 계정에 따라 파라미터명이 `ServiceKey`, `itemName` 등으로 다를 수 있으므로 관리자 화면에서 수정할 수 있게 되어 있습니다. 동기화 버튼을 누르면 검색어별 조회 결과가 항생제 리스트에 반영됩니다.
+API 종류나 승인 계정에 따라 파라미터명이 `ServiceKey`, `itemName`, `_type` 등으로 다를 수 있으므로 관리자 화면에서 수정할 수 있게 되어 있습니다. 공공데이터포털의 `Encoding` 인증키를 쓰는 경우 `URL 인코딩된 인증키 사용`을 체크하고, `Decoding` 인증키를 쓰는 경우 체크하지 마세요. 동기화 버튼을 누르면 검색어별 조회 결과가 항생제 리스트에 반영됩니다.
 
 비밀번호 해시는 아래 방식으로 만들 수 있습니다.
 

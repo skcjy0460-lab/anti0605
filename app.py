@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+from urllib.parse import urlencode
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -720,6 +721,8 @@ def fetch_mfds_drugs(
     search_terms: list[str],
     key_param: str,
     query_param: str,
+    response_type_param: str,
+    service_key_is_encoded: bool,
     rows_per_term: int,
 ) -> tuple[pd.DataFrame, list[str]]:
     rows: list[dict[str, str]] = []
@@ -737,15 +740,19 @@ def fetch_mfds_drugs(
             key_param: service_key,
             "pageNo": 1,
             "numOfRows": rows_per_term,
-            "type": "json",
+            response_type_param: "json",
             query_param: term,
         }
         try:
-            response = requests.get(endpoint, params=params, timeout=20)
-            if response.status_code == 403:
+            if service_key_is_encoded:
+                query = urlencode(params, safe="%")
+                response = requests.get(f"{endpoint}?{query}", timeout=20)
+            else:
+                response = requests.get(endpoint, params=params, timeout=20)
+            if response.status_code in [401, 403]:
                 errors.append(
-                    f"{term}: 403 Forbidden. 인증키가 이 API에 승인되지 않았거나, 엔드포인트/인증키 종류가 맞지 않을 수 있습니다. "
-                    "공공데이터포털에서 해당 API 활용신청 승인 여부와 일반 인증키(Decoding) 사용 여부를 확인하세요."
+                    f"{term}: {response.status_code} 인증 실패. 인증키가 이 API에 승인되지 않았거나, Encoding/Decoding 키 사용 방식이 맞지 않을 수 있습니다. "
+                    "공공데이터포털의 활용신청 승인 여부를 확인하고, Encoding 키를 쓰는 경우 'URL 인코딩된 인증키' 옵션을 켜거나 Decoding 키를 사용하세요."
                 )
                 continue
             response.raise_for_status()
@@ -964,10 +971,20 @@ def admin_page(drug_df: pd.DataFrame) -> None:
         value=mfds_config.get("key_param", "serviceKey"),
         help="공공데이터포털 API에 따라 serviceKey 또는 ServiceKey를 사용합니다.",
     )
+    mfds_key_is_encoded = st.checkbox(
+        "URL 인코딩된 인증키 사용",
+        value=bool(mfds_config.get("service_key_is_encoded", False)),
+        help="공공데이터포털의 Encoding 인증키를 붙여 넣은 경우 체크하세요. Decoding 인증키라면 체크하지 마세요.",
+    )
     mfds_query_param = st.text_input(
         "검색 파라미터명",
         value=mfds_config.get("query_param", "item_name"),
         help="API 종류에 따라 item_name, itemName 등이 다를 수 있습니다.",
+    )
+    mfds_response_type_param = st.text_input(
+        "JSON 응답 파라미터명",
+        value=mfds_config.get("response_type_param", "type"),
+        help="API에 따라 type=json 또는 _type=json을 사용합니다.",
     )
     mfds_terms = st.text_area(
         "동기화 검색어",
@@ -988,7 +1005,9 @@ def admin_page(drug_df: pd.DataFrame) -> None:
                 "service_key": mfds_key,
                 "endpoint": mfds_endpoint,
                 "key_param": mfds_key_param,
+                "service_key_is_encoded": bool(mfds_key_is_encoded),
                 "query_param": mfds_query_param,
+                "response_type_param": mfds_response_type_param,
                 "search_terms": mfds_terms,
                 "rows_per_term": int(rows_per_term),
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -1000,7 +1019,16 @@ def admin_page(drug_df: pd.DataFrame) -> None:
         if st.button("식약처 API 동기화", type="primary", use_container_width=True):
             terms = [x.strip() for x in mfds_terms.split(",") if x.strip()]
             with st.spinner("식약처 API에서 약제 허가정보를 조회하는 중입니다."):
-                synced_df, errors = fetch_mfds_drugs(mfds_key, mfds_endpoint, terms, mfds_key_param, mfds_query_param, int(rows_per_term))
+                synced_df, errors = fetch_mfds_drugs(
+                    mfds_key,
+                    mfds_endpoint,
+                    terms,
+                    mfds_key_param,
+                    mfds_query_param,
+                    mfds_response_type_param,
+                    bool(mfds_key_is_encoded),
+                    int(rows_per_term),
+                )
             if not synced_df.empty:
                 current_custom = load_custom_antibiotics()
                 merged = pd.concat([current_custom, synced_df], ignore_index=True) if not current_custom.empty else synced_df
