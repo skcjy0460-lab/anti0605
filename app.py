@@ -621,6 +621,22 @@ def strip_html(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 10:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def sanitize_error_message(message: str, service_key: str) -> str:
+    cleaned = str(message)
+    if service_key:
+        cleaned = cleaned.replace(service_key, mask_secret(service_key))
+    cleaned = re.sub(r"(serviceKey=)[^&\s]+", r"\1****", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
 def infer_generation_from_name(name: str) -> str:
     text = name.lower()
     mapping = {
@@ -726,6 +742,12 @@ def fetch_mfds_drugs(
         }
         try:
             response = requests.get(endpoint, params=params, timeout=20)
+            if response.status_code == 403:
+                errors.append(
+                    f"{term}: 403 Forbidden. 인증키가 이 API에 승인되지 않았거나, 엔드포인트/인증키 종류가 맞지 않을 수 있습니다. "
+                    "공공데이터포털에서 해당 API 활용신청 승인 여부와 일반 인증키(Decoding) 사용 여부를 확인하세요."
+                )
+                continue
             response.raise_for_status()
             try:
                 payload = response.json()
@@ -740,7 +762,7 @@ def fetch_mfds_drugs(
                 if isinstance(item, dict):
                     rows.append(mfds_record_to_antibiotic(item, term))
         except Exception as exc:
-            errors.append(f"{term}: {exc}")
+            errors.append(f"{term}: {sanitize_error_message(str(exc), service_key)}")
 
     if not rows:
         return pd.DataFrame(), errors
